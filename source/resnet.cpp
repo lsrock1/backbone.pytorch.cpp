@@ -1,6 +1,5 @@
 #include <resnet.h>
 
-using namespace model::resnet;
 
 namespace model{
     namespace resnet{
@@ -16,12 +15,34 @@ ResNetImpl::ResNetImpl(const char* block,
               expansion_(block_.compare("Bottleneck") == 0 ? BottleneckImpl::kExpansion : BasicBlockImpl::kExpansion),
               conv1_(register_module("conv1", torch::nn::Conv2d(torch::nn::Conv2dOptions(3, in_planes_, 7).stride(2).padding(3).with_bias(false)))),
               bn1_(register_module("bn1", torch::nn::BatchNorm(in_planes_))),
-              layer1_(register_module("layer1", MakeLayer(64, layers.at(0)))),
-              layer2_(register_module("layer2", MakeLayer(128, layers.at(1), 2))),
-              layer3_(register_module("layer3", MakeLayer(256, layers.at(2), 2))),
-              layer4_(register_module("layer4", MakeLayer(512, layers.at(3), 2))),
+              layer1_(register_module("layer1", MakeLayer(64, layers[0]))),
+              layer2_(register_module("layer2", MakeLayer(128, layers[1], 2))),
+              layer3_(register_module("layer3", MakeLayer(256, layers[2], 2))),
+              layer4_(register_module("layer4", MakeLayer(512, layers[3], 2))),
               fc_(register_module("fc", torch::nn::Linear(512 * expansion_, num_classes))){
-                  initialize();
+                  initialize(zero_init_residual, block);
+              }
+
+ResNetImpl::ResNetImpl(const char* block,
+            const std::initializer_list<int64_t> layers, 
+            int num_classes, 
+            bool zero_init_residual, 
+            int64_t groups, 
+            int64_t width_per_group)
+            : groups_(groups),
+              base_width_(width_per_group),
+              block_(block),
+              expansion_(block_.compare("Bottleneck") == 0 ? BottleneckImpl::kExpansion : BasicBlockImpl::kExpansion),
+              conv1_(register_module("conv1", torch::nn::Conv2d(torch::nn::Conv2dOptions(3, in_planes_, 7).stride(2).padding(3).with_bias(false)))),
+              bn1_(register_module("bn1", torch::nn::BatchNorm(in_planes_))),
+              fc_(register_module("fc", torch::nn::Linear(512 * expansion_, num_classes))){
+                  auto it = layers.begin();
+                  layer1_ = register_module("layer1", MakeLayer(64, *(it++)));
+                  layer2_ = register_module("layer2", MakeLayer(128, *(it++)));
+                  layer3_ = register_module("layer3", MakeLayer(256, *(it++), 2));
+                  layer4_ = register_module("layer4", MakeLayer(512, *(it++), 2));
+
+                  initialize(zero_init_residual, block);
               }
 
 torch::Tensor ResNetImpl::forward(torch::Tensor x){
@@ -36,35 +57,38 @@ torch::Tensor ResNetImpl::forward(torch::Tensor x){
     return fc_->forward(x);
 }
 
-void ResNetImpl::initialize(){
-    for(auto &module : modules(false)){
-        if (module->name().find("Conv2d") != std::string::npos) {
-            for (auto& p : module->named_parameters()) {
-                if (p.key().find("weight") != std::string::npos) {
-                torch::nn::init::xavier_uniform_(p.value());
-                } else if (p.key().find("bias") != std::string::npos) {
-                torch::nn::init::zeros_(p.value());
-                }
+void ResNetImpl::initialize(bool zero_init_residual, std::string block_name){
+    for(auto &param : this->named_parameters()){
+        if(param.key().find("conv") != std::string::npos){
+            if(param.key().find("weight") != std::string::npos) {
+                torch::nn::init::xavier_uniform_(param.value());
             }
-        } 
-        else if (module->name().find("BatchNorm2d") != std::string::npos) {
-            for (auto& p : module->named_parameters()) {
-                if (p.key().find("weight") != std::string::npos) {
-                torch::nn::init::ones_(p.value());
-                }
-                if (p.key().find("bias") != std::string::npos) {
-                torch::nn::init::zeros_(p.value());
-                }
+            else if (param.key().find("bias") != std::string::npos) {
+                torch::nn::init::zeros_(param.value());
             }
         }
-        else if (module->name().find("Linear") != std::string::npos) {
-            for (auto& p : module->named_parameters()) {
-                if (p.key().find("weight") != std::string::npos) {
-                torch::nn::init::normal_(p.value(), 0, 0.01);
+        else if(param.key().find("bn") != std::string::npos){
+            if (param.key().find("weight") != std::string::npos) {
+                if(param.key().find("bn3") != std::string::npos && block_name.compare("Bottleneck") == 0){
+                    torch::nn::init::zeros_(param.value());
                 }
-                if (p.key().find("bias") != std::string::npos) {
-                torch::nn::init::zeros_(p.value());
+                else if(param.key().find("bn2") != std::string::npos && block_name.compare("BasicBlock") == 0){
+                    torch::nn::init::zeros_(param.value());
                 }
+                else{
+                    torch::nn::init::ones_(param.value());
+                }
+            }
+            else if (param.key().find("bias") != std::string::npos) {
+                torch::nn::init::zeros_(param.value());
+            }
+        }
+        else if(param.key().find("fc") != std::string::npos){
+            if (param.key().find("weight") != std::string::npos) {
+                torch::nn::init::normal_(param.value(), 0, 0.01);
+            }
+            else if (param.key().find("bias") != std::string::npos) {
+                torch::nn::init::zeros_(param.value());
             }
         }
     }
@@ -114,11 +138,11 @@ BottleneckImpl::BottleneckImpl(int64_t in_planes,
                             int64_t groups, 
                             int64_t base_width)
                             : width_(out_planes * (base_width/64.) * groups),
-                              conv1_(register_module("conv1", Conv1x1(in_planes, out_planes * (base_width/64.) * groups))),
-                              bn1_(register_module("bn1", torch::nn::BatchNorm(out_planes * (base_width/64.) * groups))),
-                              conv2_(register_module("conv2", Conv3x3(out_planes * (base_width/64.) * groups, out_planes * (base_width/64.) * groups, stride, groups))),
-                              bn2_(register_module("bn2", torch::nn::BatchNorm(out_planes * (base_width/64.) * groups))),
-                              conv3_(register_module("conv3", Conv1x1(out_planes * (base_width/64.) * groups, out_planes * BottleneckImpl::kExpansion))),
+                              conv1_(register_module("conv1", Conv1x1(in_planes, width_))),
+                              bn1_(register_module("bn1", torch::nn::BatchNorm(width_))),
+                              conv2_(register_module("conv2", Conv3x3(width_, width_, stride, groups))),
+                              bn2_(register_module("bn2", torch::nn::BatchNorm(width_))),
+                              conv3_(register_module("conv3", Conv1x1(width_, out_planes * BottleneckImpl::kExpansion))),
                               bn3_(register_module("bn3", torch::nn::BatchNorm(out_planes * BottleneckImpl::kExpansion))),
                               downsample_(register_module("downsample", downsample)),
                               stride_(stride){};
@@ -129,11 +153,11 @@ BottleneckImpl::BottleneckImpl(int64_t in_planes,
                             int64_t groups, 
                             int64_t base_width)
                             : width_(out_planes * (base_width/64.) * groups),
-                              conv1_(register_module("conv1", Conv1x1(in_planes, out_planes * (base_width/64.) * groups))),
-                              bn1_(register_module("bn1", torch::nn::BatchNorm(out_planes * (base_width/64.) * groups))),
-                              conv2_(register_module("conv2", Conv3x3(out_planes * (base_width/64.) * groups, out_planes * (base_width/64.) * groups, stride, groups))),
-                              bn2_(register_module("bn2", torch::nn::BatchNorm(out_planes * (base_width/64.) * groups))),
-                              conv3_(register_module("conv3", Conv1x1(out_planes * (base_width/64.) * groups, out_planes * BottleneckImpl::kExpansion))),
+                              conv1_(register_module("conv1", Conv1x1(in_planes, width_))),
+                              bn1_(register_module("bn1", torch::nn::BatchNorm(width_))),
+                              conv2_(register_module("conv2", Conv3x3(width_, width_, stride, groups))),
+                              bn2_(register_module("bn2", torch::nn::BatchNorm(width_))),
+                              conv3_(register_module("conv3", Conv1x1(width_, out_planes * BottleneckImpl::kExpansion))),
                               bn3_(register_module("bn3", torch::nn::BatchNorm(out_planes * BottleneckImpl::kExpansion))),
                               stride_(stride){};
 
