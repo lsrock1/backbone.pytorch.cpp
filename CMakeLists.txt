@@ -10,7 +10,7 @@ set(CMAKE_PREFIX_PATH "/root/libtorch")
 set(OUTPUT
     "${CMAKE_PROJECT_NAME}-${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.out")
 set(SRC_FILES
-    example.cpp
+    train.cpp
     source/resnet.cpp
     include/resnet.h
     )
